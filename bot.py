@@ -34,14 +34,26 @@ Follow these requirements exactly:
 2. Extract only factual updates, decisions made, important links or resources,
    and substantive topic discussions relevant to planning the hackathon.
 3. Output a clean, professional, objective summary in concise Markdown bullets.
+4. Always refer to people by their Discord server display name provided in the
+   transcript's "author" field. Never use Discord usernames, handles, or @mentions
+   in the summary when a server display name is available.
 
 Organize related bullets beneath short topic headings. Clearly distinguish a
 confirmed decision from a proposal, question, or unresolved issue. Include
 owners and next steps only when the source states them. Preserve important URLs
 exactly. Attribute claims when certainty or agreement is unclear. Do not infer,
 speculate, editorialize, or repeat information. Do not add a top-level title or
-a preamble. If the source contains no substantive planning information, output
-exactly NO_SUBSTANTIVE_UPDATES.
+a preamble.
+
+At the bottom, add an **Action Items:** section for concrete follow-ups that are
+explicitly stated or directly supported by the discussion. Include an owner and
+deadline only when stated. Then add an **Unanswered Questions:** section for
+material unresolved questions, decisions, or blockers. Do not treat rhetorical
+or casual questions as unresolved work. Omit either section when it would be
+empty, and never invent an action item or question.
+
+If the source contains no substantive planning information, output exactly
+NO_SUBSTANTIVE_UPDATES.
 """.strip()
 
 GENERATION_CONFIG = types.GenerateContentConfig(
@@ -164,7 +176,7 @@ def message_record(message: discord.Message) -> str | None:
 
     record = {
         "timestamp_utc": message.created_at.isoformat(),
-        "author": getattr(message.author, "display_name", str(message.author)),
+        "author": message.author.global_name or message.author.name,
         "content": content,
         "attachments": attachments,
         "stickers": stickers,
@@ -273,25 +285,122 @@ async def summarize_records(
     return partial_summaries[0]
 
 
-async def send_ephemeral(interaction: discord.Interaction, text: str) -> None:
+async def send_ephemeral(
+    interaction: discord.Interaction,
+    text: str,
+    *,
+    dismissible: bool = False,
+) -> None:
     """Send chunked interaction output visible only to the requester."""
     chunks = discord_chunks(text)
     if not chunks:
         return
 
+    view = DismissSummaryView(interaction) if dismissible else None
     if interaction.response.is_done():
         await interaction.edit_original_response(
-            content=chunks[0], allowed_mentions=NO_MENTIONS
+            content=chunks[0], view=view, allowed_mentions=NO_MENTIONS
         )
     else:
         await interaction.response.send_message(
-            chunks[0], ephemeral=True, allowed_mentions=NO_MENTIONS
+            chunks[0],
+            ephemeral=True,
+            view=view,
+            allowed_mentions=NO_MENTIONS,
         )
 
     for chunk in chunks[1:]:
-        await interaction.followup.send(
-            chunk, ephemeral=True, allowed_mentions=NO_MENTIONS
+        message = await interaction.followup.send(
+            chunk,
+            ephemeral=True,
+            allowed_mentions=NO_MENTIONS,
+            wait=True,
         )
+        if view is not None and message is not None:
+            view.followup_messages.append(message)
+
+
+class RequesterOnlyView(discord.ui.View):
+    """Base view that only accepts input from the original requester."""
+
+    def __init__(self, requester_id: int, *, timeout: float = 840) -> None:
+        super().__init__(timeout=timeout)
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "These controls belong to the person who requested the summary.",
+            ephemeral=True,
+        )
+        return False
+
+
+class DismissSummaryView(RequesterOnlyView):
+    """A thumbs-up button that removes every chunk of an ephemeral summary."""
+
+    def __init__(self, source_interaction: discord.Interaction) -> None:
+        super().__init__(source_interaction.user.id)
+        self.source_interaction = source_interaction
+        self.followup_messages: list[discord.WebhookMessage] = []
+
+    @discord.ui.button(
+        label="Dismiss",
+        emoji="👍",
+        style=discord.ButtonStyle.secondary,
+        custom_id="summary:dismiss",
+    )
+    async def dismiss(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        await interaction.response.defer()
+
+        for message in self.followup_messages:
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                logger.debug("A summary follow-up was already unavailable")
+
+        try:
+            await self.source_interaction.delete_original_response()
+        except discord.NotFound:
+            pass
+        self.stop()
+
+
+class SummaryRangeView(RequesterOnlyView):
+    """Quick-access lookback buttons shown when hours are omitted."""
+
+    async def generate(self, interaction: discord.Interaction, hours: int) -> None:
+        await interaction.response.edit_message(
+            content=f"Generating a private summary for the last {hours} hours…",
+            view=None,
+            allowed_mentions=NO_MENTIONS,
+        )
+        await generate_summary(interaction, hours)
+
+    @discord.ui.button(
+        label="3 Days",
+        emoji="3️⃣",
+        style=discord.ButtonStyle.primary,
+        custom_id="summary:3-days",
+    )
+    async def three_days(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        await self.generate(interaction, 72)
+
+    @discord.ui.button(
+        label="7 Days",
+        emoji="7️⃣",
+        style=discord.ButtonStyle.primary,
+        custom_id="summary:7-days",
+    )
+    async def seven_days(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ) -> None:
+        await self.generate(interaction, 168)
 
 
 @bot.event
