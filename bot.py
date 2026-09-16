@@ -17,7 +17,7 @@ from google.genai import errors as genai_errors
 from google.genai import types
 
 
-MODEL_NAMES = ("gemini-3.5-flash", "gemini-3.5-flash-lite")
+MODEL_NAMES = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 MAX_LOOKBACK_HOURS = 24 * 7
 MAX_GEMINI_INPUT_CHARS = 80_000
 DISCORD_MESSAGE_LIMIT = 2_000
